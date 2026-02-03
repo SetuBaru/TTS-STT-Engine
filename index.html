@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SilkyVoice – Whisper Transcription</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 2rem;
+      background: #0f172a;
+      color: #e5e7eb;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: #111827;
+      padding: 2rem;
+      border-radius: 1rem;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    }
+    h1 {
+      margin-top: 0;
+      margin-bottom: 1rem;
+      font-size: 1.8rem;
+      color: #fbbf24;
+    }
+    p {
+      color: #9ca3af;
+    }
+    .section {
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid #1f2937;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 0.6rem 1.2rem;
+      border-radius: 0.5rem;
+      cursor: pointer;
+      font-size: 0.95rem;
+      margin-right: 0.5rem;
+    }
+    button.secondary {
+      background: #374151;
+    }
+    button:disabled {
+      background: #4b5563;
+      cursor: not-allowed;
+    }
+    input[type="file"] {
+      margin-top: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    #status {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      color: #93c5fd;
+    }
+    #status.error {
+      color: #f87171;
+    }
+    #transcription {
+      white-space: pre-wrap;
+      background: #020617;
+      padding: 1rem;
+      border-radius: 0.75rem;
+      margin-top: 0.75rem;
+      min-height: 4rem;
+      border: 1px solid #1f2937;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+    .badge {
+      display: inline-block;
+      background: #1d4ed8;
+      color: #e5e7eb;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      margin-left: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>
+      SilkyVoice – Whisper Transcription
+      <span class="badge">Demo</span>
+    </h1>
+    <p>Upload an audio file or record directly in the browser and send it to your FastAPI Whisper backend.</p>
+    <p><a href="/tts" style="color: #93c5fd;">Text to Speech (Arabic & English) →</a></p>
+
+    <div class="section">
+      <h2>Upload audio file</h2>
+      <input type="file" id="fileInput" accept="audio/*" />
+      <br />
+      <button id="uploadBtn">Transcribe Uploaded File</button>
+    </div>
+
+    <div class="section">
+      <h2>Record from microphone</h2>
+      <button id="recordBtn">Start Recording</button>
+      <button id="stopBtn" disabled>Stop &amp; Transcribe</button>
+      <div id="recordingStatus" style="margin-top: 0.5rem; font-size: 0.9rem;"></div>
+    </div>
+
+    <div class="section">
+      <h2>Transcription</h2>
+      <div id="status"></div>
+      <div id="transcription">(result will appear here)</div>
+    </div>
+  </div>
+
+  <script>
+    // Use same origin when served from API; fallback when opened as file or origin invalid
+    const API_BASE = (window.location.origin && (window.location.protocol === "http:" || window.location.protocol === "https:"))
+      ? window.location.origin
+      : "http://127.0.0.1:8000";
+    const API_URL = API_BASE + "/transcribe";
+
+    const fileInput = document.getElementById("fileInput");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const recordBtn = document.getElementById("recordBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const recordingStatus = document.getElementById("recordingStatus");
+    const statusEl = document.getElementById("status");
+    const transcriptionEl = document.getElementById("transcription");
+
+    let mediaRecorder = null;
+    let recordedChunks = [];
+
+    async function sendAudioBlob(blob) {
+      const formData = new FormData();
+      const file = new File([blob], "recording.webm", { type: blob.type || "audio/webm" });
+      formData.append("file", file);
+
+      statusEl.textContent = "Uploading and transcribing… (first time can take 1–2 min to load the model)";
+      statusEl.classList.remove("error");
+      transcriptionEl.textContent = "";
+
+      const startMs = Date.now();
+      const progressInterval = setInterval(() => {
+        if (transcriptionEl.textContent !== "" || statusEl.classList.contains("error")) return;
+        const sec = Math.floor((Date.now() - startMs) / 1000);
+        if (sec >= 30) statusEl.textContent = `Still transcribing… (${sec}s – first load can take 1–2 min, please wait)`;
+      }, 5000);
+
+      try {
+        const response = await fetch(API_URL, {
+          method: "POST",
+          body: formData,
+        });
+
+        clearInterval(progressInterval);
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const msg = Array.isArray(errorData.detail) ? errorData.detail.map((x) => x.msg || x).join("; ") : (errorData.detail || `Request failed with status ${response.status}`);
+          if (response.status === 504) throw new Error(msg + " Try a shorter recording or restart the server without --reload.");
+          throw new Error(msg);
+        }
+
+        const data = await response.json();
+        statusEl.textContent = `Language: ${data.language} (p=${data.language_probability.toFixed(2)})`;
+        statusEl.classList.remove("error");
+        transcriptionEl.textContent = data.text || "(no text returned)";
+      } catch (err) {
+        clearInterval(progressInterval);
+        console.error(err);
+        statusEl.textContent = "Error: " + err.message;
+        statusEl.classList.add("error");
+        transcriptionEl.textContent = "";
+      }
+    }
+
+    // Handle file upload
+    uploadBtn.addEventListener("click", () => {
+      const file = fileInput.files[0];
+      if (!file) {
+        alert("Please select an audio file first.");
+        return;
+      }
+      sendAudioBlob(file);
+    });
+
+    // Handle recording
+    recordBtn.addEventListener("click", async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert("Your browser does not support audio recording.");
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        recordedChunks = [];
+        mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            recordedChunks.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          const blob = new Blob(recordedChunks, { type: "audio/webm" });
+          sendAudioBlob(blob);
+          stream.getTracks().forEach((track) => track.stop());
+        };
+
+        mediaRecorder.start();
+        recordingStatus.textContent = "Recording…";
+        recordBtn.disabled = true;
+        stopBtn.disabled = false;
+      } catch (err) {
+        console.error(err);
+        alert("Could not start recording: " + err.message);
+      }
+    });
+
+    stopBtn.addEventListener("click", () => {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        recordingStatus.textContent = "Recording stopped. Sending to server…";
+        recordBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    });
+  </script>
+</body>
+</html>
+
