@@ -3,7 +3,14 @@
 SilkyVoice is a FastAPI backend that provides:
 
 - **Speech-to-Text**: Upload or record audio and get transcriptions using [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
+
+  <img width="994" height="831" alt="Screenshot 2026-02-03 at 11 04 37" src="https://github.com/user-attachments/assets/9ebf284d-fba3-49f9-90da-c567c63d0f0e" />
+
 - **Text-to-Speech**: Generate speech from Arabic or English text using Coqui XTTS-v2 (multilingual TTS).
+
+  <img width="714" height="732" alt="Screenshot 2026-02-03 at 11 06 06" src="https://github.com/user-attachments/assets/3fcf78f7-dda3-47b9-9f37-96df4a13a630" />
+
+
 
 Web UIs are served at `/` (transcription) and `/tts` (TTS).
 
