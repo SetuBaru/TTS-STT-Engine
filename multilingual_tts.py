@@ -1,44 +1,61 @@
 """
-Multilingual Text-to-Speech using Coqui XTTS-v2.
-Supports Arabic and English (and other XTTS-v2 languages) with a single model.
+Multilingual Text-to-Speech using NAMAA-Saudi-TTS (Chatterbox).
+Supports Arabic text-to-speech with Saudi dialect.
 """
 
-import io
+import os
+import tempfile
 from typing import Optional, Literal
 
-# --- Transformers compatibility: Coqui TTS does "from transformers import BeamSearchScorer".
-#     Newer transformers use a LazyModule that only exposes names in _class_to_module;
-#     BeamSearchScorer exists in generation.beam_search but isn't in that map. Register it.
-_transformers_patched = False
-
-def _patch_transformers_for_tts():
-    global _transformers_patched
-    if _transformers_patched:
-        return
-    try:
-        import transformers  # noqa: F401
-        # LazyModule resolves names via _class_to_module; add BeamSearchScorer -> generation.beam_search
-        if hasattr(transformers, "_class_to_module"):
-            transformers._class_to_module["BeamSearchScorer"] = "generation.beam_search"
-        if hasattr(transformers, "_objects"):
-            from transformers.generation.beam_search import BeamSearchScorer
-            transformers._objects["BeamSearchScorer"] = BeamSearchScorer
-        if hasattr(transformers, "__all__") and "BeamSearchScorer" not in transformers.__all__:
-            transformers.__all__.append("BeamSearchScorer")
-        _transformers_patched = True
-    except Exception:
-        pass
-
-_patch_transformers_for_tts()
+import torch
+import torchaudio as ta
+from huggingface_hub import snapshot_download
+from safetensors.torch import load_file as load_safetensors
+from chatterbox import mtl_tts
 
 # Lazy-loaded model
-_tts = None
+_model = None
+_ckpt_dir = None
 
-# XTTS-v2 sample rate (fixed)
+# NAMAA-Saudi-TTS sample rate
 SAMPLE_RATE = 24000
 
-# Default preset speaker (works for both Arabic and English in XTTS-v2)
-DEFAULT_SPEAKER = "Claribel Dervla"
+
+def _get_device():
+    """Get the best available device."""
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        return "mps"
+    else:
+        return "cpu"
+
+
+def _get_tts():
+    """Lazy-load the NAMAA-Saudi-TTS model."""
+    global _model, _ckpt_dir
+    
+    if _model is None:
+        device = _get_device()
+        
+        # Download model repo
+        _ckpt_dir = snapshot_download(
+            repo_id="NAMAA-Space/NAMAA-Saudi-TTS",
+            repo_type="model",
+            revision="main"
+        )
+        
+        # Load base model
+        _model = mtl_tts.ChatterboxMultilingualTTS.from_pretrained(device=device)
+        
+        # Load Saudi checkpoint
+        t3_path = os.path.join(_ckpt_dir, "t3_mtl23ls_v2.safetensors")
+        t3_state = load_safetensors(t3_path, device=device)
+        
+        _model.t3.load_state_dict(t3_state)
+        _model.t3.to(device).eval()
+    
+    return _model
 
 
 def _has_arabic_chars(s: str) -> bool:
@@ -56,18 +73,6 @@ def _detect_language(text: str) -> Literal["ar", "en"]:
     return "en"
 
 
-def _get_tts():
-    global _tts
-    if _tts is None:
-        # Ensure patch is applied (in case transformers was loaded after our module)
-        _patch_transformers_for_tts()
-        import torch
-        from TTS.api import TTS
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
-    return _tts
-
-
 def synthesize(
     text: str,
     language: Literal["auto", "ar", "en"] = "auto",
@@ -77,9 +82,10 @@ def synthesize(
     Convert text to speech and return WAV bytes and sample rate.
 
     Args:
-        text: Text to synthesize (Arabic or English).
+        text: Text to synthesize (Arabic).
         language: "auto" (detect from script), "ar" (Arabic), or "en" (English).
-        speaker: Preset speaker name; uses DEFAULT_SPEAKER if not set.
+                  Note: This model primarily supports Arabic. English requests will be treated as Arabic.
+        speaker: Not used (kept for API compatibility).
 
     Returns:
         Tuple of (wav_bytes, sample_rate).
@@ -91,27 +97,28 @@ def synthesize(
     lang = language
     if lang == "auto":
         lang = _detect_language(t)
+    
+    # NAMAA-Saudi-TTS is optimized for Arabic, but we'll use it for any text
+    # If language is explicitly "en", we still process it (model may handle it)
     if lang not in ("ar", "en"):
-        lang = "en"
-
-    spk = speaker or DEFAULT_SPEAKER
+        lang = "ar"
+    
     model = _get_tts()
 
-    import tempfile
+    # Generate speech
+    with torch.no_grad():
+        wav = model.generate(t, language_id="ar")
+    
+    # Convert to bytes
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_path = tmp.name
+    
     try:
-        model.tts_to_file(
-            text=t,
-            speaker=spk,
-            language=lang,
-            file_path=tmp_path,
-        )
+        ta.save(tmp_path, wav.cpu(), model.sr)
         with open(tmp_path, "rb") as f:
             wav_bytes = f.read()
-        return wav_bytes, SAMPLE_RATE
+        return wav_bytes, model.sr
     finally:
-        import os
         try:
             os.unlink(tmp_path)
         except OSError:

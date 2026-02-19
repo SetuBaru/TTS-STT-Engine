@@ -17,3 +17,8 @@ transformers>=4.33.0
 # --- Shared / runtime ---
 numpy>=1.24.0
 scipy>=1.10.0
+
+# --- Text-to-speech (NAMAA-Saudi-TTS) ---
+chatterbox
+huggingface_hub>=0.20.0
+safetensors>=0.4.0
