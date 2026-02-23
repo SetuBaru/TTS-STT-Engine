@@ -81,6 +81,43 @@
       font-size: 0.75rem;
       margin-left: 0.5rem;
     }
+    .subtitle {
+      color: #9ca3af;
+      font-size: 0.9rem;
+      margin: 0.25rem 0 0.75rem 0;
+    }
+    .tts-row {
+      margin-bottom: 0.75rem;
+    }
+    .tts-row label {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: #9ca3af;
+      font-size: 0.9rem;
+    }
+    .tts-row select {
+      background: #1f2937;
+      color: #e5e7eb;
+      border: 1px solid #374151;
+      padding: 0.4rem 0.6rem;
+      border-radius: 0.5rem;
+      font-size: 0.95rem;
+    }
+    button.primary {
+      background: #f59e0b;
+      color: #0f172a;
+    }
+    .tts-status {
+      font-size: 0.9rem;
+      color: #93c5fd;
+      margin-top: 0.5rem;
+    }
+    .tts-status.error {
+      color: #f87171;
+    }
+    .audio-section {
+      margin-top: 0.5rem;
+    }
   </style>
 </head>
 <body>
@@ -111,6 +148,27 @@
       <div id="status"></div>
       <div id="transcription">(result will appear here)</div>
     </div>
+
+    <div class="section" id="ttsSection" style="display: none;">
+      <h2>Convert to speech</h2>
+      <p class="subtitle">Speak the transcribed text aloud using the same interface.</p>
+      <div class="tts-row">
+        <label for="ttsLanguage">Language</label>
+        <select id="ttsLanguage" aria-label="TTS language">
+          <option value="auto">Auto (from text)</option>
+          <option value="ar">Arabic</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <div class="tts-row">
+        <button id="speakBtn" class="primary">Speak</button>
+        <button id="playTtsBtn" class="secondary" disabled>Play</button>
+      </div>
+      <div id="ttsStatus" class="tts-status"></div>
+      <div class="audio-section">
+        <audio id="ttsAudio" controls style="width: 100%; margin-top: 0.5rem;"></audio>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -118,7 +176,8 @@
     const API_BASE = (window.location.origin && (window.location.protocol === "http:" || window.location.protocol === "https:"))
       ? window.location.origin
       : "http://127.0.0.1:8000";
-    const API_URL = API_BASE + "/transcribe";
+    const API_TRANSCRIBE = API_BASE + "/transcribe";
+    const API_TTS = API_BASE + "/tts";
 
     const fileInput = document.getElementById("fileInput");
     const uploadBtn = document.getElementById("uploadBtn");
@@ -127,9 +186,23 @@
     const recordingStatus = document.getElementById("recordingStatus");
     const statusEl = document.getElementById("status");
     const transcriptionEl = document.getElementById("transcription");
+    const ttsSection = document.getElementById("ttsSection");
+    const ttsLanguage = document.getElementById("ttsLanguage");
+    const speakBtn = document.getElementById("speakBtn");
+    const playTtsBtn = document.getElementById("playTtsBtn");
+    const ttsStatus = document.getElementById("ttsStatus");
+    const ttsAudio = document.getElementById("ttsAudio");
 
     let mediaRecorder = null;
     let recordedChunks = [];
+    let currentStream = null;
+    let silenceCheckInterval = null;
+    let audioContext = null;
+    let analyserNode = null;
+    const SILENCE_THRESHOLD = 0.008;   // RMS below this = silence
+    const SILENCE_DURATION_MS = 3000; // 3 seconds
+    const SILENCE_CHECK_INTERVAL_MS = 200;
+    let silenceStartMs = null;
 
     async function sendAudioBlob(blob) {
       const formData = new FormData();
@@ -148,7 +221,7 @@
       }, 5000);
 
       try {
-        const response = await fetch(API_URL, {
+        const response = await fetch(API_TRANSCRIBE, {
           method: "POST",
           body: formData,
         });
@@ -164,15 +237,79 @@
         const data = await response.json();
         statusEl.textContent = `Language: ${data.language} (p=${data.language_probability.toFixed(2)})`;
         statusEl.classList.remove("error");
-        transcriptionEl.textContent = data.text || "(no text returned)";
+        const text = data.text || "(no text returned)";
+        transcriptionEl.textContent = text;
+        if (text && text !== "(no text returned)") {
+          ttsSection.style.display = "block";
+          ttsStatus.textContent = "";
+        } else {
+          ttsSection.style.display = "none";
+        }
       } catch (err) {
         clearInterval(progressInterval);
         console.error(err);
         statusEl.textContent = "Error: " + err.message;
         statusEl.classList.add("error");
         transcriptionEl.textContent = "";
+        ttsSection.style.display = "none";
       }
     }
+
+    async function speakTranscription() {
+      const text = (transcriptionEl.textContent || "").trim();
+      if (!text || text === "(result will appear here)" || text === "(no text returned)") {
+        ttsStatus.textContent = "No text to speak. Transcribe first.";
+        ttsStatus.classList.add("error");
+        return;
+      }
+      ttsStatus.textContent = "Generating speech…";
+      ttsStatus.classList.remove("error");
+      speakBtn.disabled = true;
+      playTtsBtn.disabled = true;
+      ttsAudio.removeAttribute("src");
+
+      try {
+        const lang = ttsLanguage.value || "auto";
+        const response = await fetch(API_TTS, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, language: lang }),
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `TTS failed: ${response.status}`);
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        ttsAudio.src = url;
+        ttsAudio.onloadedmetadata = () => {
+          ttsStatus.textContent = "Ready. Use the player or click Play.";
+          speakBtn.disabled = false;
+          playTtsBtn.disabled = false;
+        };
+        ttsAudio.onerror = () => {
+          ttsStatus.textContent = "Failed to load audio.";
+          ttsStatus.classList.add("error");
+          speakBtn.disabled = false;
+          playTtsBtn.disabled = false;
+        };
+      } catch (err) {
+        console.error(err);
+        ttsStatus.textContent = "Error: " + err.message;
+        ttsStatus.classList.add("error");
+        speakBtn.disabled = false;
+        playTtsBtn.disabled = false;
+      }
+    }
+
+    playTtsBtn.addEventListener("click", () => {
+      if (ttsAudio.src) {
+        ttsAudio.currentTime = 0;
+        ttsAudio.play();
+      }
+    });
+
+    speakBtn.addEventListener("click", speakTranscription);
 
     // Handle file upload
     uploadBtn.addEventListener("click", () => {
@@ -184,6 +321,71 @@
       sendAudioBlob(file);
     });
 
+    function stopSilenceDetection() {
+      if (silenceCheckInterval) {
+        clearInterval(silenceCheckInterval);
+        silenceCheckInterval = null;
+      }
+      silenceStartMs = null;
+      if (audioContext && audioContext.state !== "closed") {
+        audioContext.close();
+      }
+      audioContext = null;
+      analyserNode = null;
+    }
+
+    function getRms(buffer) {
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        const n = buffer[i];
+        sum += n * n;
+      }
+      return Math.sqrt(sum / buffer.length);
+    }
+
+    function startSilenceDetection(stream) {
+      if (silenceCheckInterval) return;
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioContext.createMediaStreamSource(stream);
+        analyserNode = audioContext.createAnalyser();
+        analyserNode.fftSize = 256;
+        analyserNode.smoothingTimeConstant = 0.4;
+        source.connect(analyserNode);
+
+        const buffer = new Float32Array(analyserNode.fftSize);
+
+        silenceCheckInterval = setInterval(() => {
+          if (!mediaRecorder || mediaRecorder.state === "inactive") return;
+          analyserNode.getFloatTimeDomainData(buffer);
+          const rms = getRms(buffer);
+          if (rms < SILENCE_THRESHOLD) {
+            if (silenceStartMs === null) silenceStartMs = Date.now();
+            else if (Date.now() - silenceStartMs >= SILENCE_DURATION_MS) {
+              stopSilenceDetection();
+              if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                recordingStatus.textContent = "Pause detected (3s). Transcribing…";
+                mediaRecorder.stop();
+              }
+            }
+          } else {
+            silenceStartMs = null;
+          }
+        }, SILENCE_CHECK_INTERVAL_MS);
+      } catch (e) {
+        console.warn("Silence detection not available:", e);
+      }
+    }
+
+    function stopRecordingAndTranscribe() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+        recordingStatus.textContent = "Sending to server…";
+      }
+      recordBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+
     // Handle recording
     recordBtn.addEventListener("click", async () => {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -193,25 +395,31 @@
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        currentStream = stream;
         recordedChunks = [];
         mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
 
         mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            recordedChunks.push(event.data);
-          }
+          if (event.data.size > 0) recordedChunks.push(event.data);
         };
 
         mediaRecorder.onstop = () => {
+          stopSilenceDetection();
           const blob = new Blob(recordedChunks, { type: "audio/webm" });
           sendAudioBlob(blob);
-          stream.getTracks().forEach((track) => track.stop());
+          if (currentStream) {
+            currentStream.getTracks().forEach((t) => t.stop());
+            currentStream = null;
+          }
+          recordBtn.disabled = false;
+          stopBtn.disabled = true;
         };
 
         mediaRecorder.start();
-        recordingStatus.textContent = "Recording…";
+        recordingStatus.textContent = "Recording… (stop manually or pause 3s to auto-transcribe)";
         recordBtn.disabled = true;
         stopBtn.disabled = false;
+        startSilenceDetection(stream);
       } catch (err) {
         console.error(err);
         alert("Could not start recording: " + err.message);
@@ -219,12 +427,13 @@
     });
 
     stopBtn.addEventListener("click", () => {
+      stopSilenceDetection();
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
         mediaRecorder.stop();
-        recordingStatus.textContent = "Recording stopped. Sending to server…";
-        recordBtn.disabled = false;
-        stopBtn.disabled = true;
+        recordingStatus.textContent = "Stopped. Sending to server…";
       }
+      recordBtn.disabled = false;
+      stopBtn.disabled = true;
     });
   </script>
 </body>
