@@ -26,7 +26,7 @@ def main() -> None:
         print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    model = WhisperModel("./models/large-v3", device="cuda", compute_type="int8", local_files_only=True)
+    model = WhisperModel("./models/faster-whisper-large-v3", device="cuda", compute_type="int8", local_files_only=True)
     segments, info = model.transcribe(str(audio_path))
     full_text = "".join(segment.text for segment in segments)
     out = {
