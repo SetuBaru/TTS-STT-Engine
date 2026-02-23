@@ -26,7 +26,7 @@ def main() -> None:
         print(f"Import error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    model = WhisperModel("openai/whisper-large-v3", device="gpu", compute_type="int8")
+    model = WhisperModel("openai/whisper-large-v3", device="cuda", compute_type="int8")
     segments, info = model.transcribe(str(audio_path))
     full_text = "".join(segment.text for segment in segments)
     out = {
