@@ -1,6 +1,3 @@
-# Must run first so Coqui TTS can "from transformers import BeamSearchScorer" (uvicorn --reload worker doesn't run run_server.py)
-import tts_transformers_patch  # noqa: F401, E402
-
 import json
 import logging
 import os

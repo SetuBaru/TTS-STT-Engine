@@ -8,17 +8,15 @@ python-multipart>=0.0.6
 # --- Speech-to-text (Whisper worker) ---
 faster-whisper>=1.0.0
 
-# --- Text-to-speech (Coqui XTTS-v2, Arabic & English) ---
-TTS>=0.22.0
+# --- Text-to-speech (NAMAA-Saudi-TTS; Chatterbox may require TTS at runtime) ---
 torch>=2.0.0
 torchaudio>=2.0.0
-transformers>=4.33.0
+chatterbox
+huggingface_hub>=0.20.0
+safetensors>=0.4.0
+# If you see "No module named 'TTS'", install: pip install TTS
+TTS>=0.22.0
 
 # --- Shared / runtime ---
 numpy>=1.24.0
 scipy>=1.10.0
-
-# --- Text-to-speech (NAMAA-Saudi-TTS) ---
-chatterbox
-huggingface_hub>=0.20.0
-safetensors>=0.4.0

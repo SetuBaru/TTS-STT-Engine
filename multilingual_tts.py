@@ -13,6 +13,18 @@ from huggingface_hub import snapshot_download
 from safetensors.torch import load_file as load_safetensors
 from chatterbox import mtl_tts
 
+# PyTorch 2.6+ uses weights_only=True by default in torch.load; allow TTS/Chatterbox
+# model config classes so checkpoint loading does not fail.
+def _allowlist_tts_globals():
+    try:
+        from TTS.tts.configs.xtts_config import XttsConfig
+        torch.serialization.add_safe_globals([XttsConfig])
+    except Exception:
+        pass
+
+
+_allowlist_tts_globals()
+
 # Lazy-loaded model
 _model = None
 _ckpt_dir = None
