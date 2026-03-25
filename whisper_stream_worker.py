@@ -24,7 +24,12 @@ from pathlib import Path
 
 
 def _ffmpeg_to_wav_16k_mono(input_path: Path, wav_path: Path) -> None:
-    # Keep this conversion deterministic and lightweight for realtime-ish use.
+    """
+    Convert an incoming chunk into 16kHz mono WAV.
+
+    Note: some MediaRecorder chunks might not be independently decodable.
+    When that happens, ffmpeg will fail and we raise with stderr for debugging.
+    """
     cmd = [
         "ffmpeg",
         "-y",
@@ -40,7 +45,13 @@ def _ffmpeg_to_wav_16k_mono(input_path: Path, wav_path: Path) -> None:
         "wav",
         str(wav_path),
     ]
-    subprocess.run(cmd, check=True)
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise RuntimeError(
+            f"ffmpeg failed (exit={proc.returncode}) while converting chunk: {input_path.name}. "
+            f"stderr={stderr[:2000]!r}"
+        )
 
 
 def main() -> None:
@@ -79,13 +90,21 @@ def main() -> None:
                 raise FileNotFoundError(str(webm_path))
 
             wav_path = webm_path.with_suffix(".wav")
-            _ffmpeg_to_wav_16k_mono(webm_path, wav_path)
+            transcribe_path = None
+            # Prefer converting to wav for consistent decode/resampling.
+            try:
+                _ffmpeg_to_wav_16k_mono(webm_path, wav_path)
+                transcribe_path = str(wav_path)
+            except Exception:
+                # Fallback: some chunks may not be ffmpeg-decodable as WAV;
+                # faster-whisper's decoder may still succeed on the original container.
+                transcribe_path = str(webm_path)
 
             # For speed: smaller beam size. For realtime: chunk-by-chunk.
             # Language: if detected_language is known, reuse it to avoid per-chunk detection overhead.
             language_param = detected_language
             segments, info = model.transcribe(
-                str(wav_path),
+                transcribe_path,
                 language=language_param,
                 beam_size=1,
                 best_of=1,
