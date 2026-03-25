@@ -89,10 +89,10 @@ Or with the venv:
 .venv/bin/python run_server.py
 ```
 
-The server starts at **http://127.0.0.1:8000**. Pages:
+The server starts at **http://127.0.0.1:8231**. Pages:
 
-- **Transcription**: http://127.0.0.1:8000/
-- **Text-to-Speech**: http://127.0.0.1:8000/tts
+- **Transcription**: http://127.0.0.1:8231/
+- **Text-to-Speech**: http://127.0.0.1:8231/tts
 
 Alternatively, run with Uvicorn directly:
 
@@ -104,9 +104,9 @@ uvicorn api:app --reload --host 0.0.0.0 --port 8000
 
 ## API documentation
 
-Base URL: **http://127.0.0.1:8000** (or your host/port).
+Base URL: **http://127.0.0.1:8231** (or your host/port).
 
-Interactive docs: **http://127.0.0.1:8000/docs** (Swagger UI).
+Interactive docs: **http://127.0.0.1:8231/docs** (Swagger UI).
 
 ### Health
 
@@ -117,7 +117,7 @@ Interactive docs: **http://127.0.0.1:8000/docs** (Swagger UI).
 **Example**
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8231/health
 ```
 
 **Response (200)**
@@ -144,7 +144,7 @@ curl http://127.0.0.1:8000/health
 **Example**
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/transcribe" \
+curl -X POST "http://127.0.0.1:8231/transcribe" \
      -F "file=@test.wav"
 ```
 
@@ -156,6 +156,51 @@ curl -X POST "http://127.0.0.1:8000/transcribe" \
   "language_probability": 0.98,
   "text": "Transcribed text here..."
 }
+```
+
+---
+
+### Realtime / chunked transcription (WebSocket)
+
+For realtime transcription while the user is recording, the UI uses a WebSocket and sends audio **in chunks** to `/transcribe/stream`.
+
+| Method | Path                  | Description                                             |
+|--------|-----------------------|---------------------------------------------------------|
+| `WS`   | `/transcribe/stream` | Send audio incrementally, receive partial + final text |
+
+#### Client -> Server protocol
+
+1. Send **binary WebSocket messages** containing audio bytes (browser-produced WebM).
+2. Send a **text** message exactly: `"end"` to finalize the session.
+
+#### Server -> Client protocol
+
+The server emits JSON text frames:
+
+- `{"type":"partial","chunk_index":0,"text":"...","full_text":"...","language":"...","language_probability":0.98}`
+- `{"type":"final","full_text":"...","language":"...","language_probability":0.98}`
+- `{"type":"error","detail":"..."}`
+
+#### Important note about chunk encoding
+
+Browsers often produce `MediaRecorder` WebM fragments that are not independently decodable by `ffmpeg`.
+To keep streaming robust, this project’s UI sends a **cumulative WebM blob** (it appends each new `MediaRecorder` chunk to the previous ones) and re-transcribes as it grows.
+
+#### Minimal JS usage example
+
+```javascript
+const ws = new WebSocket("ws://127.0.0.1:8231/transcribe/stream");
+
+ws.onmessage = (ev) => {
+  const msg = JSON.parse(ev.data);
+  if (msg.type === "partial") console.log("partial:", msg.full_text);
+  if (msg.type === "final") console.log("final:", msg.full_text);
+};
+
+// Send binary audio bytes repeatedly (ArrayBuffer/Uint8Array),
+// then finalize:
+ws.send(arrayBufferOfWebm);
+ws.send("end");
 ```
 
 ---
@@ -178,7 +223,7 @@ curl -X POST "http://127.0.0.1:8000/transcribe" \
 **Example (English)**
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/tts" \
+curl -X POST "http://127.0.0.1:8231/tts" \
      -H "Content-Type: application/json" \
      -d '{"text": "Hello world", "language": "en"}' \
      --output speech.wav
@@ -187,7 +232,7 @@ curl -X POST "http://127.0.0.1:8000/tts" \
 **Example (Arabic)**
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/tts" \
+curl -X POST "http://127.0.0.1:8231/tts" \
      -H "Content-Type: application/json" \
      -d '{"text": "مرحبا بك", "language": "ar"}' \
      --output speech.wav
@@ -196,7 +241,7 @@ curl -X POST "http://127.0.0.1:8000/tts" \
 **Example (auto-detect language)**
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/tts" \
+curl -X POST "http://127.0.0.1:8231/tts" \
      -H "Content-Type: application/json" \
      -d '{"text": "Hello world or مرحبا"}' \
      --output speech.wav
@@ -218,17 +263,17 @@ curl -X POST "http://127.0.0.1:8000/tts" \
 
 1. **Start the API server** (see [Running the API server](#running-the-api-server)).
 
-2. **Transcription** – open **http://127.0.0.1:8000/** (or the root URL of your server):
+2. **Transcription** – open **http://127.0.0.1:8231/** (or the root URL of your server):
    - Upload an audio file and click **"Transcribe Uploaded File"**, or
    - Click **"Start Recording"**, speak, then **"Stop & Transcribe"**.
-   - The transcription and detected language appear below (e.g. double-click it, or open it via your browser’s “File → Open” dialog).
+   - While recording, the UI updates the transcript in realtime using `/transcribe/stream` (partial results), then finalizes when you stop.
 
-3. **Text-to-Speech** – open **http://127.0.0.1:8000/tts**:
+3. **Text-to-Speech** – open **http://127.0.0.1:8231/tts**:
    - Choose **Language** (Auto, Arabic, or English).
    - Enter text in the **Text** field (Arabic or English).
    - Click **"Generate audio"** and use the player to listen.
 
-The UIs use the same host/port as the server (e.g. `http://127.0.0.1:8000`). If you run the server on a different host or port, open the corresponding URLs.
+The UIs use the same host/port as the server (e.g. `http://127.0.0.1:8231`). If you run the server on a different host or port, open the corresponding URLs.
 
 ---
 
