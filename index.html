@@ -177,6 +177,7 @@
       ? window.location.origin
       : "http://127.0.0.1:8000";
     const API_TRANSCRIBE = API_BASE + "/transcribe";
+    const WS_TRANSCRIBE = API_BASE.replace(/^http/, "ws") + "/transcribe/stream";
     const API_TTS = API_BASE + "/tts";
 
     const fileInput = document.getElementById("fileInput");
@@ -194,8 +195,8 @@
     const ttsAudio = document.getElementById("ttsAudio");
 
     let mediaRecorder = null;
-    let recordedChunks = [];
     let currentStream = null;
+    let ws = null;
     let silenceCheckInterval = null;
     let audioContext = null;
     let analyserNode = null;
@@ -203,6 +204,7 @@
     const SILENCE_DURATION_MS = 3000; // 3 seconds
     const SILENCE_CHECK_INTERVAL_MS = 200;
     let silenceStartMs = null;
+    const MEDIA_CHUNK_MS = 2000;
 
     async function sendAudioBlob(blob) {
       const formData = new FormData();
@@ -364,7 +366,7 @@
             else if (Date.now() - silenceStartMs >= SILENCE_DURATION_MS) {
               stopSilenceDetection();
               if (mediaRecorder && mediaRecorder.state !== "inactive") {
-                recordingStatus.textContent = "Pause detected (3s). Transcribing…";
+                recordingStatus.textContent = "Pause detected (3s). Finishing stream…";
                 mediaRecorder.stop();
               }
             }
@@ -394,32 +396,122 @@
       }
 
       try {
+        // Close any previous streaming session.
+        if (ws) {
+          try { ws.close(); } catch (e) {}
+          ws = null;
+        }
+
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         currentStream = stream;
-        recordedChunks = [];
         mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
 
-        mediaRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) recordedChunks.push(event.data);
+        // Reset UI for realtime mode.
+        transcriptionEl.textContent = "";
+        statusEl.textContent = "Language: … (streaming)";
+        statusEl.classList.remove("error");
+        ttsSection.style.display = "none";
+        ttsStatus.textContent = "";
+        recordingStatus.textContent = "Connecting for streaming transcription…";
+
+        // WebSocket for partial + final results.
+        ws = new WebSocket(WS_TRANSCRIBE);
+
+        ws.onopen = () => {
+          recordingStatus.textContent = "Recording… (streaming; stop manually or pause 3s)";
+          mediaRecorder.start(MEDIA_CHUNK_MS);
+          startSilenceDetection(stream);
+          recordBtn.disabled = true;
+          stopBtn.disabled = false;
         };
 
-        mediaRecorder.onstop = () => {
-          stopSilenceDetection();
-          const blob = new Blob(recordedChunks, { type: "audio/webm" });
-          sendAudioBlob(blob);
-          if (currentStream) {
-            currentStream.getTracks().forEach((t) => t.stop());
-            currentStream = null;
+        ws.onmessage = (event) => {
+          let data = null;
+          try { data = JSON.parse(event.data); } catch (e) {}
+          if (!data) return;
+
+          if (data.type === "partial") {
+            const full = (data.full_text || data.text || "").trim();
+            transcriptionEl.textContent = full || "";
+
+            const lang = data.language ? data.language : "…";
+            const p = (data.language_probability !== null && data.language_probability !== undefined)
+              ? Number(data.language_probability).toFixed(2)
+              : null;
+            statusEl.textContent = `Language: ${lang}${p !== null ? " (p=" + p + ")" : ""} (streaming)`;
+            statusEl.classList.remove("error");
           }
+
+          if (data.type === "final") {
+            const full = (data.full_text || "").trim();
+            transcriptionEl.textContent = full || "";
+            const lang = data.language ? data.language : "…";
+            const p = (data.language_probability !== null && data.language_probability !== undefined)
+              ? Number(data.language_probability).toFixed(2)
+              : null;
+            statusEl.textContent = `Language: ${lang}${p !== null ? " (p=" + p + ")" : ""} (final)`;
+            statusEl.classList.remove("error");
+
+            if (full && full !== "(no text returned)") {
+              ttsSection.style.display = "block";
+              ttsStatus.textContent = "";
+            } else {
+              ttsSection.style.display = "none";
+            }
+
+            recordingStatus.textContent = "Done. Streaming transcription completed.";
+            try { ws && ws.close(); } catch (e) {}
+            ws = null;
+            recordBtn.disabled = false;
+            stopBtn.disabled = true;
+          }
+
+          if (data.type === "error") {
+            statusEl.textContent = "Error: " + (data.detail || "transcription failed");
+            statusEl.classList.add("error");
+            transcriptionEl.textContent = "";
+            ttsSection.style.display = "none";
+            recordingStatus.textContent = "Error during streaming transcription.";
+            try { ws && ws.close(); } catch (e) {}
+            ws = null;
+            recordBtn.disabled = false;
+            stopBtn.disabled = true;
+          }
+        };
+
+        ws.onerror = () => {
+          statusEl.textContent = "WebSocket error (stream failed).";
+          statusEl.classList.add("error");
+          recordingStatus.textContent = "WebSocket error during streaming transcription.";
+          ttsSection.style.display = "none";
+          try { ws && ws.close(); } catch (e) {}
+          ws = null;
           recordBtn.disabled = false;
           stopBtn.disabled = true;
         };
 
-        mediaRecorder.start();
-        recordingStatus.textContent = "Recording… (stop manually or pause 3s to auto-transcribe)";
-        recordBtn.disabled = true;
-        stopBtn.disabled = false;
-        startSilenceDetection(stream);
+        ws.onclose = () => {
+          // If close happened before a "final" message, leave status as-is.
+        };
+
+        mediaRecorder.ondataavailable = (event) => {
+          if (!event.data || event.data.size <= 0) return;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(event.data);
+        };
+
+        mediaRecorder.onstop = () => {
+          stopSilenceDetection();
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send("end");
+          }
+          if (currentStream) {
+            currentStream.getTracks().forEach((t) => t.stop());
+            currentStream = null;
+          }
+        };
+
+        // Defer mediaRecorder.start() until ws is connected.
       } catch (err) {
         console.error(err);
         alert("Could not start recording: " + err.message);

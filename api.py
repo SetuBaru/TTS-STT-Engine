@@ -3,9 +3,10 @@ import logging
 import os
 import subprocess
 import sys
+import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ app = FastAPI()
 
 # Whisper runs in a separate process to isolate segfaults (faster-whisper/ctranslate2 on macOS).
 _WHISPER_WORKER = Path(__file__).resolve().parent / "whisper_worker.py"
+_WHISPER_STREAM_WORKER = Path(__file__).resolve().parent / "whisper_stream_worker.py"
 _TRANSCRIBE_TIMEOUT = 300
 _SUBPROCESS_ENV = {**os.environ, "OMP_NUM_THREADS": "1"}
 
@@ -120,6 +122,128 @@ async def transcribe_audio(file: UploadFile = File(...)):
                 Path(tmp_path).unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+@app.websocket("/transcribe/stream")
+async def transcribe_stream(websocket: WebSocket):
+    """
+    Streaming transcription over WebSocket.
+
+    Client protocol:
+      - send binary websocket messages: each message is an audio chunk (e.g. WebM from MediaRecorder)
+      - send text message "end" to finalize
+    Server protocol:
+      - emits JSON lines as text frames:
+          {type:"partial", chunk_index, text, full_text, language, language_probability}
+          {type:"final", full_text, language, language_probability}
+          {type:"error", detail}
+    """
+    await websocket.accept()
+
+    if not _WHISPER_STREAM_WORKER.exists():
+        await websocket.send_text(json.dumps({"type": "error", "detail": "whisper_stream_worker.py not found"}))
+        await websocket.close()
+        return
+
+    # Use a dedicated temp directory per websocket session.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="whisper_stream_"))
+    chunk_index = 0
+    proc: Optional[asyncio.subprocess.Process] = None
+    stdout_task: Optional[asyncio.Task] = None
+
+    async def _start_worker() -> asyncio.subprocess.Process:
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(_WHISPER_STREAM_WORKER),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_SUBPROCESS_ENV,
+            cwd=Path(__file__).resolve().parent,
+        )
+
+    async def _worker_stdout_forward() -> None:
+        # Worker prints JSON lines; forward each line to client.
+        assert proc is not None and proc.stdout is not None
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            try:
+                await websocket.send_text(line.decode("utf-8", errors="replace").rstrip("\n"))
+            except Exception:
+                break
+
+    try:
+        proc = await _start_worker()
+        stdout_task = asyncio.create_task(_worker_stdout_forward())
+
+        while True:
+            msg = await websocket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+
+            # Text frames: use "end" to finalize.
+            if msg.get("text") is not None:
+                text_msg = (msg.get("text") or "").strip().lower()
+                if text_msg in ("end", "stop", "final", "done"):
+                    break
+                continue
+
+            # Binary frames are treated as audio chunks.
+            chunk_bytes = msg.get("bytes")
+            if not chunk_bytes:
+                continue
+
+            webm_path = tmp_dir / f"chunk_{chunk_index}.webm"
+            webm_path.write_bytes(chunk_bytes)
+
+            assert proc.stdin is not None
+            proc.stdin.write((str(webm_path) + "\n").encode("utf-8"))
+            await proc.stdin.drain()
+
+            chunk_index += 1
+
+        # Signal worker end and wait briefly for it to finish.
+        if proc and proc.stdin:
+            try:
+                proc.stdin.write(b"END\n")
+                await proc.stdin.drain()
+            except Exception:
+                pass
+
+        # Ensure we forward whatever is left from stdout.
+        if stdout_task:
+            try:
+                await asyncio.wait_for(stdout_task, timeout=20.0)
+            except asyncio.TimeoutError:
+                stdout_task.cancel()
+
+        if proc:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=20.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+
+    except WebSocketDisconnect:
+        # Client disconnected; try to shutdown worker.
+        try:
+            if proc and proc.stdin:
+                proc.stdin.write(b"END\n")
+                await proc.stdin.drain()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.exception("transcribe_stream failed: %s", e)
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "detail": str(e)}))
+        except Exception:
+            pass
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 # --- Multilingual Text-to-Speech (Arabic & English) ---
