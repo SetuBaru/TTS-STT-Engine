@@ -138,7 +138,9 @@ async def transcribe_stream(websocket: WebSocket):
           {type:"final", full_text, language, language_probability}
           {type:"error", detail}
     """
+    logger.info("WS /transcribe/stream: connection attempt from %s", websocket.client)
     await websocket.accept()
+    logger.info("WS /transcribe/stream: accepted")
 
     if not _WHISPER_STREAM_WORKER.exists():
         await websocket.send_text(json.dumps({"type": "error", "detail": "whisper_stream_worker.py not found"}))
@@ -194,6 +196,9 @@ async def transcribe_stream(websocket: WebSocket):
             chunk_bytes = msg.get("bytes")
             if not chunk_bytes:
                 continue
+            # FastAPI may expose binary frames as `memoryview`; normalize to `bytes`.
+            if isinstance(chunk_bytes, memoryview):
+                chunk_bytes = chunk_bytes.tobytes()
 
             webm_path = tmp_dir / f"chunk_{chunk_index}.webm"
             webm_path.write_bytes(chunk_bytes)
@@ -224,6 +229,7 @@ async def transcribe_stream(websocket: WebSocket):
                 await asyncio.wait_for(proc.wait(), timeout=20.0)
             except asyncio.TimeoutError:
                 proc.kill()
+        logger.info("WS /transcribe/stream: finished (chunks=%s)", chunk_index)
 
     except WebSocketDisconnect:
         # Client disconnected; try to shutdown worker.
@@ -233,6 +239,7 @@ async def transcribe_stream(websocket: WebSocket):
                 await proc.stdin.drain()
         except Exception:
             pass
+        logger.info("WS /transcribe/stream: client disconnected (chunks=%s)", chunk_index)
     except Exception as e:
         logger.exception("transcribe_stream failed: %s", e)
         try:

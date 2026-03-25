@@ -175,7 +175,7 @@
     // Use same origin when served from API; fallback when opened as file or origin invalid
     const API_BASE = (window.location.origin && (window.location.protocol === "http:" || window.location.protocol === "https:"))
       ? window.location.origin
-      : "http://127.0.0.1:8000";
+      : "http://127.0.0.1:8231";
     const API_TRANSCRIBE = API_BASE + "/transcribe";
     const WS_TRANSCRIBE = API_BASE.replace(/^http/, "ws") + "/transcribe/stream";
     const API_TTS = API_BASE + "/tts";
@@ -416,6 +416,7 @@
 
         // WebSocket for partial + final results.
         ws = new WebSocket(WS_TRANSCRIBE);
+        recordingStatus.textContent = "Connecting to " + WS_TRANSCRIBE;
 
         ws.onopen = () => {
           recordingStatus.textContent = "Recording… (streaming; stop manually or pause 3s)";
@@ -480,7 +481,7 @@
         };
 
         ws.onerror = () => {
-          statusEl.textContent = "WebSocket error (stream failed).";
+          statusEl.textContent = "WebSocket error while streaming. Tried: " + WS_TRANSCRIBE;
           statusEl.classList.add("error");
           recordingStatus.textContent = "WebSocket error during streaming transcription.";
           ttsSection.style.display = "none";
@@ -490,14 +491,23 @@
           stopBtn.disabled = true;
         };
 
-        ws.onclose = () => {
-          // If close happened before a "final" message, leave status as-is.
+        ws.onclose = (event) => {
+          if (!statusEl.classList.contains("error")) {
+            statusEl.textContent = "WebSocket closed (code=" + event.code + ", reason=" + event.reason + ")";
+          }
         };
 
-        mediaRecorder.ondataavailable = (event) => {
+        mediaRecorder.ondataavailable = async (event) => {
           if (!event.data || event.data.size <= 0) return;
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          ws.send(event.data);
+          // Send as ArrayBuffer to ensure the server receives a binary `bytes` payload.
+          try {
+            const buf = await event.data.arrayBuffer();
+            ws.send(buf);
+          } catch (e) {
+            // Fallback: try sending the Blob directly.
+            try { ws.send(event.data); } catch (e2) {}
+          }
         };
 
         mediaRecorder.onstop = () => {
