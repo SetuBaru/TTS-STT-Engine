@@ -197,6 +197,7 @@
     let mediaRecorder = null;
     let currentStream = null;
     let ws = null;
+    let recordedChunks = [];
     let silenceCheckInterval = null;
     let audioContext = null;
     let analyserNode = null;
@@ -404,6 +405,7 @@
 
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         currentStream = stream;
+        recordedChunks = [];
         mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
 
         // Reset UI for realtime mode.
@@ -497,17 +499,18 @@
           }
         };
 
+        // MediaRecorder "timeslice" blobs are sometimes not independently decodable by ffmpeg.
+        // To keep realtime updates while ensuring decodability, we send a *cumulative* WebM blob.
         mediaRecorder.ondataavailable = async (event) => {
           if (!event.data || event.data.size <= 0) return;
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          // Send as ArrayBuffer to ensure the server receives a binary `bytes` payload.
-          try {
-            const buf = await event.data.arrayBuffer();
-            ws.send(buf);
-          } catch (e) {
-            // Fallback: try sending the Blob directly.
-            try { ws.send(event.data); } catch (e2) {}
-          }
+
+          recordedChunks.push(event.data);
+          const cumulativeBlob = new Blob(recordedChunks, { type: "audio/webm" });
+
+          // Send as ArrayBuffer so FastAPI reliably receives a binary payload.
+          const buf = await cumulativeBlob.arrayBuffer();
+          ws.send(buf);
         };
 
         mediaRecorder.onstop = () => {

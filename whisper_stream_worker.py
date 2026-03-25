@@ -120,17 +120,27 @@ def main() -> None:
 
             chunk_text = "".join(seg.text for seg in segments).strip()
 
-            if chunk_text:
-                if full_text and not full_text.endswith((" ", "\n")):
-                    full_text += " "
-                full_text += chunk_text
+            # The client sends a *cumulative* WebM blob, so re-transcribing will
+            # include previously recognized text. Avoid duplicating by computing
+            # the incremental delta against our last `full_text`.
+            new_full_text = chunk_text
+            if not full_text:
+                incremental_text = new_full_text
+                full_text = new_full_text
+            else:
+                if new_full_text.startswith(full_text):
+                    incremental_text = new_full_text[len(full_text):].strip()
+                else:
+                    # Fallback: overwrite if prefix matching fails.
+                    incremental_text = new_full_text
+                full_text = new_full_text
 
             out = {
                 "type": "partial",
                 "chunk_index": chunk_index,
                 "language": detected_language,
                 "language_probability": last_language_probability,
-                "text": chunk_text,
+                "text": incremental_text,
                 "full_text": full_text.strip(),
             }
             print(json.dumps(out, ensure_ascii=False), flush=True)
