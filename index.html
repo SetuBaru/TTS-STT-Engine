@@ -126,8 +126,21 @@
       SilkyVoice – Whisper Transcription
       <span class="badge">Demo</span>
     </h1>
-    <p>Upload an audio file or record directly in the browser and send it to your FastAPI Whisper backend.</p>
+    <p>Upload an audio file or record directly in the browser. Transcription supports <strong>English</strong>, <strong>Arabic</strong>, or <strong>both in the same recording</strong> (code-switching).</p>
     <p><a href="/tts" style="color: #93c5fd;">Text to Speech (Arabic & English) →</a></p>
+
+    <div class="section">
+      <h2>Speech language</h2>
+      <p class="subtitle">Choose how Whisper should treat the audio. Use &quot;Arabic &amp; English (mixed)&quot; when you switch languages while speaking.</p>
+      <div class="tts-row">
+        <label for="sttLanguage">Transcription language mode</label>
+        <select id="sttLanguage" aria-label="Transcription language mode">
+          <option value="mixed" selected>Arabic &amp; English (mixed)</option>
+          <option value="en">English only</option>
+          <option value="ar">Arabic only</option>
+        </select>
+      </div>
+    </div>
 
     <div class="section">
       <h2>Upload audio file</h2>
@@ -193,6 +206,7 @@
     const playTtsBtn = document.getElementById("playTtsBtn");
     const ttsStatus = document.getElementById("ttsStatus");
     const ttsAudio = document.getElementById("ttsAudio");
+    const sttLanguage = document.getElementById("sttLanguage");
 
     let mediaRecorder = null;
     let currentStream = null;
@@ -211,6 +225,7 @@
       const formData = new FormData();
       const file = new File([blob], "recording.webm", { type: blob.type || "audio/webm" });
       formData.append("file", file);
+      formData.append("language", sttLanguage.value || "mixed");
 
       statusEl.textContent = "Uploading and transcribing… (first time can take 1–2 min to load the model)";
       statusEl.classList.remove("error");
@@ -238,7 +253,12 @@
         }
 
         const data = await response.json();
-        statusEl.textContent = `Language: ${data.language} (p=${data.language_probability.toFixed(2)})`;
+        const p =
+          data.language_probability !== null && data.language_probability !== undefined
+            ? Number(data.language_probability).toFixed(2)
+            : null;
+        statusEl.textContent =
+          p !== null ? `Mode: ${data.language} (p=${p})` : `Mode: ${data.language}`;
         statusEl.classList.remove("error");
         const text = data.text || "(no text returned)";
         transcriptionEl.textContent = text;
@@ -410,15 +430,16 @@
 
         // Reset UI for realtime mode.
         transcriptionEl.textContent = "";
-        statusEl.textContent = "Language: … (streaming)";
+        statusEl.textContent = "Mode: … (streaming)";
         statusEl.classList.remove("error");
         ttsSection.style.display = "none";
         ttsStatus.textContent = "";
         recordingStatus.textContent = "Connecting for streaming transcription…";
 
-        // WebSocket for partial + final results.
-        ws = new WebSocket(WS_TRANSCRIBE);
-        recordingStatus.textContent = "Connecting to " + WS_TRANSCRIBE;
+        // WebSocket for partial + final results (?language=en|ar|mixed)
+        const langParam = encodeURIComponent(sttLanguage.value || "mixed");
+        ws = new WebSocket(WS_TRANSCRIBE + "?language=" + langParam);
+        recordingStatus.textContent = "Connecting to " + WS_TRANSCRIBE + "?language=" + langParam;
 
         ws.onopen = () => {
           recordingStatus.textContent = "Recording… (streaming; stop manually or pause 3s)";
@@ -441,7 +462,7 @@
             const p = (data.language_probability !== null && data.language_probability !== undefined)
               ? Number(data.language_probability).toFixed(2)
               : null;
-            statusEl.textContent = `Language: ${lang}${p !== null ? " (p=" + p + ")" : ""} (streaming)`;
+            statusEl.textContent = `Mode: ${lang}${p !== null ? " (p=" + p + ")" : ""} (streaming)`;
             statusEl.classList.remove("error");
           }
 
@@ -452,7 +473,7 @@
             const p = (data.language_probability !== null && data.language_probability !== undefined)
               ? Number(data.language_probability).toFixed(2)
               : null;
-            statusEl.textContent = `Language: ${lang}${p !== null ? " (p=" + p + ")" : ""} (final)`;
+            statusEl.textContent = `Mode: ${lang}${p !== null ? " (p=" + p + ")" : ""} (final)`;
             statusEl.classList.remove("error");
 
             if (full && full !== "(no text returned)") {
@@ -483,7 +504,7 @@
         };
 
         ws.onerror = () => {
-          statusEl.textContent = "WebSocket error while streaming. Tried: " + WS_TRANSCRIBE;
+          statusEl.textContent = "WebSocket error while streaming. Tried: " + WS_TRANSCRIBE + "?language=" + langParam;
           statusEl.classList.add("error");
           recordingStatus.textContent = "WebSocket error during streaming transcription.";
           ttsSection.style.display = "none";

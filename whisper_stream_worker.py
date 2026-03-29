@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 def _ffmpeg_to_wav_16k_mono(input_path: Path, wav_path: Path) -> None:
@@ -68,8 +69,19 @@ def main() -> None:
 
     model = WhisperModel(model_dir, device=device, compute_type=compute_type, local_files_only=True)
 
+    mode = (os.environ.get("SILKYVOICE_TRANSCRIBE_LANGUAGE") or "mixed").strip().lower()
+    if mode not in ("en", "ar", "mixed"):
+        mode = "mixed"
+
+    def _language_param() -> Optional[str]:
+        if mode == "en":
+            return "en"
+        if mode == "ar":
+            return "ar"
+        # mixed: English + Arabic in one session — do not lock to first segment.
+        return None
+
     full_text = ""
-    detected_language = None  # filled after the first chunk (if we start with language='auto')
     chunk_index = 0
     last_language_probability = None
 
@@ -101,8 +113,7 @@ def main() -> None:
                 transcribe_path = str(webm_path)
 
             # For speed: smaller beam size. For realtime: chunk-by-chunk.
-            # Language: if detected_language is known, reuse it to avoid per-chunk detection overhead.
-            language_param = detected_language
+            language_param = _language_param()
             segments, info = model.transcribe(
                 transcribe_path,
                 language=language_param,
@@ -111,12 +122,10 @@ def main() -> None:
                 vad_filter=True,
             )
 
-            if detected_language is None:
-                detected_language = info.language
+            if mode == "mixed":
                 last_language_probability = info.language_probability
             else:
-                # Keep probability from first detection (more stable).
-                last_language_probability = last_language_probability
+                last_language_probability = info.language_probability
 
             chunk_text = "".join(seg.text for seg in segments).strip()
 
@@ -135,10 +144,11 @@ def main() -> None:
                     incremental_text = new_full_text
                 full_text = new_full_text
 
+            display_lang = "mixed" if mode == "mixed" else mode
             out = {
                 "type": "partial",
                 "chunk_index": chunk_index,
-                "language": detected_language,
+                "language": display_lang,
                 "language_probability": last_language_probability,
                 "text": incremental_text,
                 "full_text": full_text.strip(),
@@ -161,11 +171,12 @@ def main() -> None:
             print(json.dumps(out, ensure_ascii=False), flush=True)
             chunk_index += 1
 
+    final_lang = "mixed" if mode == "mixed" else mode
     print(
         json.dumps(
             {
                 "type": "final",
-                "language": detected_language,
+                "language": final_lang,
                 "language_probability": last_language_probability,
                 "full_text": full_text.strip(),
             },

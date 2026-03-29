@@ -7,8 +7,20 @@ Loads faster-whisper in this process only, so any segfault is isolated from the 
 Prints JSON result to stdout and exits 0 on success; stderr + non-zero exit on error.
 """
 import json
+import os
 import sys
 from pathlib import Path
+from typing import Optional
+
+
+def _language_for_transcribe() -> Optional[str]:
+    mode = (os.environ.get("SILKYVOICE_TRANSCRIBE_LANGUAGE") or "mixed").strip().lower()
+    if mode in ("en", "english", "eng"):
+        return "en"
+    if mode in ("ar", "arabic", "ara"):
+        return "ar"
+    # mixed: English + Arabic in one clip; let Whisper auto-detect per segment.
+    return None
 
 
 def main() -> None:
@@ -27,10 +39,12 @@ def main() -> None:
         sys.exit(1)
 
     model = WhisperModel("./models/faster-whisper-large-v3", device="cuda", compute_type="int8", local_files_only=True)
-    segments, info = model.transcribe(str(audio_path))
+    lang = _language_for_transcribe()
+    segments, info = model.transcribe(str(audio_path), language=lang)
     full_text = "".join(segment.text for segment in segments)
+    out_lang = "mixed" if lang is None else info.language
     out = {
-        "language": info.language,
+        "language": out_lang,
         "language_probability": info.language_probability,
         "text": full_text.strip(),
     }

@@ -137,7 +137,9 @@ curl http://127.0.0.1:8231/health
 **Request**
 
 - **Content-Type**: `multipart/form-data`
-- **Body**: form field `file` = audio file
+- **Body**:
+  - `file` (required): audio file
+  - `language` (optional): `en` (English only), `ar` (Arabic only), or `mixed` (English and Arabic in the same clip, including code-switching). Default: `mixed`.
 
 **Supported audio types**: `audio/wav`, `audio/x-wav`, `audio/mpeg`, `audio/mp3`, `audio/webm`, `audio/ogg`, `audio/x-m4a`, `audio/mp4` (or any `audio/*`).
 
@@ -145,18 +147,21 @@ curl http://127.0.0.1:8231/health
 
 ```bash
 curl -X POST "http://127.0.0.1:8231/transcribe" \
-     -F "file=@test.wav"
+     -F "file=@test.wav" \
+     -F "language=mixed"
 ```
 
 **Response (200, JSON)**
 
 ```json
 {
-  "language": "en",
+  "language": "mixed",
   "language_probability": 0.98,
   "text": "Transcribed text here..."
 }
 ```
+
+`language` in the response is `en`, `ar`, or `mixed` (for bilingual / auto-segment detection).
 
 ---
 
@@ -170,8 +175,9 @@ For realtime transcription while the user is recording, the UI uses a WebSocket 
 
 #### Client -> Server protocol
 
-1. Send **binary WebSocket messages** containing audio bytes (browser-produced WebM).
-2. Send a **text** message exactly: `"end"` to finalize the session.
+1. Optional query parameter: `?language=en|ar|mixed` (same meaning as `POST /transcribe`). Default: `mixed`.
+2. Send **binary WebSocket messages** containing audio bytes (browser-produced WebM).
+3. Send a **text** message exactly: `"end"` to finalize the session.
 
 #### Server -> Client protocol
 
@@ -189,7 +195,7 @@ To keep streaming robust, this project’s UI sends a **cumulative WebM blob** (
 #### Minimal JS usage example
 
 ```javascript
-const ws = new WebSocket("ws://127.0.0.1:8231/transcribe/stream");
+const ws = new WebSocket("ws://127.0.0.1:8231/transcribe/stream?language=mixed");
 
 ws.onmessage = (ev) => {
   const msg = JSON.parse(ev.data);

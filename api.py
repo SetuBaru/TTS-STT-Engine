@@ -6,7 +6,7 @@ import sys
 import asyncio
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
@@ -24,6 +24,37 @@ _WHISPER_WORKER = Path(__file__).resolve().parent / "whisper_worker.py"
 _WHISPER_STREAM_WORKER = Path(__file__).resolve().parent / "whisper_stream_worker.py"
 _TRANSCRIBE_TIMEOUT = 300
 _SUBPROCESS_ENV = {**os.environ, "OMP_NUM_THREADS": "1"}
+
+
+_STT_LANG_ERROR = "Invalid language. Use 'en', 'ar', or 'mixed' (English and Arabic in the same recording)."
+
+
+def _parse_stt_language(lang: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Returns (mode, error_detail). mode is one of en|ar|mixed; error_detail set if invalid.
+    """
+    if not lang or not str(lang).strip():
+        return "mixed", None
+    l = str(lang).strip().lower()
+    if l in ("mixed", "both", "ar+en", "en+ar", "bilingual", "auto"):
+        return "mixed", None
+    if l in ("en", "english", "eng"):
+        return "en", None
+    if l in ("ar", "arabic", "ara"):
+        return "ar", None
+    return None, _STT_LANG_ERROR
+
+
+def _normalize_stt_language(lang: Optional[str]) -> str:
+    mode, err = _parse_stt_language(lang)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    assert mode is not None
+    return mode
+
+
+def _stt_subprocess_env(language_mode: str) -> dict:
+    return {**_SUBPROCESS_ENV, "SILKYVOICE_TRANSCRIBE_LANGUAGE": language_mode}
 
 
 class TTSBody(BaseModel):
@@ -62,12 +93,18 @@ _ALLOWED_AUDIO_TYPES = {
 }
 
 @app.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Form("mixed"),
+):
     """
     Accept an uploaded audio file and return Whisper transcription.
     Runs Whisper in a separate process to isolate segfaults; server stays up if the worker crashes.
+
+    Form field `language`: `en` | `ar` | `mixed` (English + Arabic in the same audio).
     """
     logger.info("POST /transcribe: request received")
+    language_mode = _normalize_stt_language(language)
     ct = (file.content_type or "").strip()
     if ct and ct not in _ALLOWED_AUDIO_TYPES and not ct.startswith("audio/"):
         raise HTTPException(
@@ -94,7 +131,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
             capture_output=True,
             text=True,
             timeout=_TRANSCRIBE_TIMEOUT,
-            env=_SUBPROCESS_ENV,
+            env=_stt_subprocess_env(language_mode),
             cwd=Path(__file__).resolve().parent,
         )
         if proc.returncode != 0:
@@ -142,6 +179,12 @@ async def transcribe_stream(websocket: WebSocket):
     await websocket.accept()
     logger.info("WS /transcribe/stream: accepted")
 
+    language_mode, lang_err = _parse_stt_language(websocket.query_params.get("language"))
+    if lang_err:
+        await websocket.send_text(json.dumps({"type": "error", "detail": lang_err}))
+        await websocket.close()
+        return
+
     if not _WHISPER_STREAM_WORKER.exists():
         await websocket.send_text(json.dumps({"type": "error", "detail": "whisper_stream_worker.py not found"}))
         await websocket.close()
@@ -160,7 +203,7 @@ async def transcribe_stream(websocket: WebSocket):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_SUBPROCESS_ENV,
+            env=_stt_subprocess_env(language_mode),
             cwd=Path(__file__).resolve().parent,
         )
 
